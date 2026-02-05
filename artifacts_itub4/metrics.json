@@ -1,0 +1,17 @@
+{
+  "ticker": "ITUB4.SA",
+  "lookback": 10,
+  "features": [
+    "Adj Close",
+    "Volume",
+    "simple_returns",
+    "std_last_5_returns",
+    "std_last_20_returns",
+    "avg_last_9",
+    "avg_last_21",
+    "rsi"
+  ],
+  "MAE": 2.482542037963867,
+  "RMSE": 3.1127028465270996,
+  "MAPE_pct": 6.544838905334473
+}
