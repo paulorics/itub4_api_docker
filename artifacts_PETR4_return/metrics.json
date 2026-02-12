@@ -1,5 +1,5 @@
 {
-  "ticker": "ITUB4.SA",
+  "ticker": "PETR4.SA",
   "target": "return",
   "lookback": 10,
   "features": [
@@ -12,7 +12,7 @@
     "avg_last_21",
     "rsi"
   ],
-  "MAE_pp": 1.0010017156600952,
-  "RMSE_pp": 1.3185734748840332,
-  "DirectionalAccuracy": 0.5657142857142857
+  "MAE_pp": 1.017141342163086,
+  "RMSE_pp": 1.3985987901687622,
+  "DirectionalAccuracy": 0.56
 }

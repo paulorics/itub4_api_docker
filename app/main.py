@@ -5,21 +5,21 @@ from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from src.inference_api import load_bundle, predict_next_return_pct_from_features
+from src.data_loader import fetch_yahoo_prices
 
 # =========================
 # Config
 # =========================
 TICKER_DEFAULT = os.getenv("TICKER", "ITUB4.SA")
 
-# Use a pasta do modelo de RETORNO (para não sobrescrever o modelo de preço direto)
+# Use a pasta do modelo de RETORNO (Return -> Price)
 ARTIFACT_DIR = os.getenv("ARTIFACT_DIR", "artifacts_itub4_return")
 
-app = FastAPI(title="ITUB4.SA LSTM Predictor (Return -> Price)", version="1.2.0")
+app = FastAPI(title="ITUB4.SA LSTM Predictor (Return -> Price)", version="1.3.0")
 
 
 # =========================
@@ -27,7 +27,7 @@ app = FastAPI(title="ITUB4.SA LSTM Predictor (Return -> Price)", version="1.2.0"
 # =========================
 class PredictFeaturesRequest(BaseModel):
     """
-    Low-level endpoint: o usuário fornece as FEATURES prontas.
+    Endpoint low-level: usuário fornece FEATURES prontas (LOOKBACK x K) + last_close.
     """
     features_history: List[List[float]] = Field(
         ...,
@@ -54,17 +54,18 @@ class PredictFromHistoryRequest(BaseModel):
     """
     history: List[HistoryRow] = Field(
         ...,
-        description="Lista de candles/dados históricos (mínimo: date, adj_close, volume)."
+        description="Lista de dados históricos (mínimo: date, adj_close, volume)."
     )
     ticker: Optional[str] = Field(None, description="Opcional. Apenas informativo na resposta.")
 
 
 class PredictAutoRequest(BaseModel):
     """
-    Endpoint de conveniência: a API busca no Yahoo Finance (yfinance).
+    Endpoint de conveniência: a API busca automaticamente os dados (Yahoo) via requests
+    (src/data_loader.py) para contornar falhas/429 no yfinance em algumas redes locais.
     """
     ticker: str = Field(TICKER_DEFAULT, description="Ticker no Yahoo Finance (ex.: ITUB4.SA)")
-    period_days: int = Field(120, description="Quantos dias para trás buscar (recomendado >= 60; padrão 120)")
+    period_days: int = Field(180, description="Quantos dias para trás usar como histórico (padrão 180)")
     interval: str = Field("1d", description="Intervalo do Yahoo Finance (ex.: 1d, 1h)")
 
 
@@ -98,8 +99,7 @@ def build_features_from_df(df: pd.DataFrame) -> pd.DataFrame:
 
     feat["rsi"] = rsi_wilder(feat["Adj Close"], period=14)
 
-    # Target pode existir no treino, mas na inferência não é necessário.
-    # Mantemos caso você queira inspecionar:
+    # Target (não é necessário na inferência, mas mantém para debug/inspeção)
     feat["y_next_return_pct"] = (feat["Adj Close"].shift(-1) / feat["Adj Close"] - 1.0) * 100.0
 
     return feat.dropna().copy()
@@ -110,9 +110,11 @@ def make_window_features(feat: pd.DataFrame, feature_cols: List[str], lookback: 
     Pega as últimas 'lookback' linhas e retorna matriz (lookback, K) na ordem do treinamento.
     """
     if len(feat) < lookback:
-        raise ValueError(f"Histórico insuficiente após feature engineering. Necessário >= {lookback} linhas válidas.")
-    X_hist = feat[feature_cols].tail(lookback).values.astype(np.float32)
-    return X_hist
+        raise ValueError(
+            f"Histórico insuficiente após feature engineering. "
+            f"Necessário >= {lookback} linhas válidas. Obtido: {len(feat)}"
+        )
+    return feat[feature_cols].tail(lookback).values.astype(np.float32)
 
 
 # =========================
@@ -204,13 +206,13 @@ def predict_from_history(req: PredictFromHistoryRequest):
     lookback = int(app.state.lookback)
     feature_cols = app.state.features
 
-    # Constrói DF
     try:
         rows = [{
             "date": r.date,
             "Adj Close": float(r.adj_close),
             "Volume": float(r.volume),
         } for r in req.history]
+
         df = pd.DataFrame(rows)
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").set_index("date")
@@ -218,15 +220,12 @@ def predict_from_history(req: PredictFromHistoryRequest):
         if df.empty:
             raise ValueError("Histórico vazio.")
 
-        # Feature engineering
         feat = build_features_from_df(df)
-
-        # Monta janela lookback e last_close do último dia da janela
         X_hist = make_window_features(feat, feature_cols, lookback)
         last_close = float(feat["Adj Close"].iloc[-1])
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Falha ao processar histórico: {e}")
+        raise HTTPException(status_code=400, detail=f"Falha ao processar histórico: {type(e).__name__}: {e}")
 
     t0 = time.time()
     pred_return_pct = predict_next_return_pct_from_features(
@@ -255,49 +254,46 @@ def predict_from_history(req: PredictFromHistoryRequest):
 
 
 # =========================
-# Endpoint 3: Conveniência (busca via yfinance)
+# Endpoint 3: Conveniência (busca automática via requests data_loader)
 # =========================
 @app.post("/predict_auto")
 def predict_auto(req: PredictAutoRequest):
     lookback = int(app.state.lookback)
     feature_cols = app.state.features
 
-    # Baixa dados do Yahoo
+    # Para garantir estabilidade das features (rolling 21, RSI 14, etc.),
+    # buscamos um range maior (ex.: 5y) e filtramos por start.
+    # Isso evita depender do parâmetro "range" dinâmico no data_loader,
+    # e mantém compatibilidade com a sua função fetch_yahoo_prices.
     try:
-        end = None
         start = (pd.Timestamp.now("UTC") - pd.Timedelta(days=int(req.period_days))).date().isoformat()
 
-        df = yf.download(
-            req.ticker,
+        df = fetch_yahoo_prices(
+            symbol=req.ticker,
             start=start,
-            end=end,
+            end=None,
+            range_="5y",          # busca amplo e filtra por start
             interval=req.interval,
-            auto_adjust=False,
-            progress=False
+            tries=10,
         )
 
         if df is None or df.empty:
-            raise ValueError("Nenhum dado retornado do yfinance (df vazio).")
+            raise ValueError("Nenhum dado retornado (df vazio).")
 
-        # Normaliza colunas
-        # yfinance vem com colunas padrão: Open High Low Close Adj Close Volume
         needed = ["Adj Close", "Volume"]
         for c in needed:
             if c not in df.columns:
-                raise ValueError(f"Coluna obrigatória ausente do yfinance: {c}")
+                raise ValueError(f"Coluna obrigatória ausente: {c}")
 
         df = df[needed].dropna().copy()
 
-        # Feature engineering
         feat = build_features_from_df(df)
-
-        # Janela + last_close
         X_hist = make_window_features(feat, feature_cols, lookback)
         last_close = float(feat["Adj Close"].iloc[-1])
 
     except Exception as e:
-        # 502 = erro “upstream” (fonte externa)
-        raise HTTPException(status_code=502, detail=f"Falha ao obter/processar dados via yfinance: {e}")
+        # 502 = falha de fonte externa / coleta automática
+        raise HTTPException(status_code=502, detail=f"Falha no modo automático: {type(e).__name__}: {e}")
 
     t0 = time.time()
     pred_return_pct = predict_next_return_pct_from_features(
@@ -319,9 +315,9 @@ def predict_auto(req: PredictAutoRequest):
         "lookback": lookback,
         "n_features": len(feature_cols),
         "latency_ms": latency_ms,
-        "mode": "auto_yfinance",
-        "yfinance_start": start,
+        "mode": "auto_data_loader_requests",
         "interval": req.interval,
-        "rows_downloaded": int(len(df)),
+        "period_days": int(req.period_days),
         "rows_used_after_features": int(len(feat)),
+        "start_filter_used": start,
     }
