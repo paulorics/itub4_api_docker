@@ -39,6 +39,8 @@ Thumbs.db
 # Cache de downloads
 # =========================
 .yfinance.cache
+*.sqlite
+yahoo_cache.sqlite
 
 # =========================
 # Artifacts do modelo
