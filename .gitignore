@@ -45,6 +45,7 @@ Thumbs.db
 # =========================
 artifacts_itub4/
 artifacts_itub4_logret_q60/
+artifacts_PETR4_return/
 
 # =========================
 # Relatórios PDF
@@ -58,3 +59,4 @@ Relatorio_Completo_Backtest_LSTM_ITUB4.pdf
 Tech_Challenge_Fase4_ITUB4_LSTM.ipynb
 Tech_Challenge_Fase4_ITUB4_LSTM-Returns-BIN.ipynb
 Tech_Challenge_Fase4_ITUB4_LSTM-Returns-logatithm.ipynb
+inference_api_log.py

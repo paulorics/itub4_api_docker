@@ -50,7 +50,7 @@ class HistoryRow(BaseModel):
 
 class PredictFromHistoryRequest(BaseModel):
     """
-    Endpoint principal (alinhado ao enunciado): usuário fornece dados históricos de preços.
+    Endpoint principal: usuário fornece dados históricos de preços.
     """
     history: List[HistoryRow] = Field(
         ...,
@@ -264,7 +264,7 @@ def predict_auto(req: PredictAutoRequest):
     # Para garantir estabilidade das features (rolling 21, RSI 14, etc.),
     # buscamos um range maior (ex.: 5y) e filtramos por start.
     # Isso evita depender do parâmetro "range" dinâmico no data_loader,
-    # e mantém compatibilidade com a sua função fetch_yahoo_prices.
+    # e mantém compatibilidade com a função fetch_yahoo_prices.
     try:
         start = (pd.Timestamp.now("UTC") - pd.Timedelta(days=int(req.period_days))).date().isoformat()
 

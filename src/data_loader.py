@@ -1,3 +1,6 @@
+# Função responsável por coletar dados históricos diretamente da API não oficial do Yahoo Finance,
+# utilizando requests com controle de headers, cookies e retentativas (retry/backoff) para evitar falhas comuns do yfinance.
+
 import time, random
 import requests
 import pandas as pd

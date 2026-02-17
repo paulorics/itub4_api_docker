@@ -9,11 +9,12 @@ Em vez de prever diretamente o preço, o modelo aprende a prever o **retorno (%)
 Preço previsto (t+1) = Preço atual (t) × (1 + Retorno previsto / 100)
 ```
 
-Essa abordagem costuma ser mais estável estatisticamente, pois retornos são séries mais estacionárias do que preços absolutos.
+Essa abordagem tende a ser estatisticamente mais estável, pois retornos são séries mais estacionárias do que preços absolutos.
 
 ---
 
 ## 1) Pré-requisitos
+
 Antes de rodar a API, é necessário ter treinado o modelo e gerado a pasta de artefatos do **modelo de retorno**:
 
 ```
@@ -26,32 +27,96 @@ artifacts_itub4_return/
   └── metrics.json
 ```
 
-> ⚠️ Importante: este projeto assume **modelo de retorno**. Caso você também tenha um modelo de preço direto, mantenha os artefatos em pastas separadas.
+> ⚠️ Importante: este projeto assume um **modelo de retorno**. Caso você também possua um modelo de preço direto, mantenha os artefatos em pastas separadas.
+
+Também é necessário ter:
+
+- Python 3.9 ou superior
+- pip instalado
 
 ---
 
 ## 2) Rodar localmente (sem Docker – recomendado)
 
-Ative o ambiente virtual e instale as dependências:
+### Por que é necessário criar um ambiente virtual (venv)?
+
+Para garantir que o **Uvicorn (servidor ASGI do FastAPI)** funcione corretamente e evitar conflitos de dependências com outros projetos Python instalados na máquina, é **fortemente recomendado criar e utilizar um ambiente virtual (venv)** antes de instalar os requisitos do projeto.
+
+---
+
+### 🔹 Passo 1 – Criar o ambiente virtual
+
+No diretório raiz do projeto, execute:
 
 ```bash
+python -m venv venv
+```
+
+Isso criará uma pasta chamada `venv/` contendo um ambiente Python isolado exclusivamente para este projeto.
+
+---
+
+### 🔹 Passo 2 – Ativar o ambiente virtual
+
+#### Windows (CMD ou PowerShell)
+
+```bash
+venv\Scripts\activate
+```
+
+#### Linux / macOS
+
+```bash
+source venv/bin/activate
+```
+
+Após ativar, você verá `(venv)` no início da linha do terminal, indicando que o ambiente está ativo.
+
+---
+
+### 🔹 Passo 3 – Instalar as dependências dentro do venv
+
+Com o ambiente virtual ativado, instale as dependências:
+
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Execute a API apontando para o arquivo principal (`app/main.py`):
+Dessa forma, todas as bibliotecas (incluindo FastAPI e Uvicorn) serão instaladas dentro do ambiente isolado.
+
+---
+
+### 🔹 Passo 4 – Executar a API com Uvicorn
+
+Defina a variável de ambiente `ARTIFACT_DIR` e inicie o servidor.
+
+#### Windows
 
 ```bash
 set ARTIFACT_DIR=artifacts_itub4_return
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+#### Linux / macOS
+
+```bash
+export ARTIFACT_DIR=artifacts_itub4_return
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+---
+
 A API ficará disponível em:
 
-- Swagger UI (interface de testes): http://127.0.0.1:8000/docs
-- Healthcheck: `GET /health`
-- Informações do modelo: `GET /model_info`
+- **Swagger UI (interface interativa):**  
+  http://127.0.0.1:8000/docs
 
-> ℹ️ Acessar `http://127.0.0.1:8000/` pode retornar **404 Not Found**. Isso é esperado, pois a API não define rota raiz.
+- **Healthcheck:**  
+  `GET /health`
+
+- **Informações do modelo:**  
+  `GET /model_info`
 
 ---
 
@@ -87,12 +152,13 @@ O endpoint `/predict` realiza **uma única previsão** do próximo dia (**t+1**)
 
 O corpo da requisição deve conter:
 
-- `features_history`: matriz 2D
-  - **N linhas = LOOKBACK** (ex.: 10)
-  - **K colunas = número de features** (mesma ordem do treinamento)
+- `features_history`: matriz 2D  
+  - **N linhas = LOOKBACK** (ex.: 10)  
+  - **K colunas = número de features** (na mesma ordem usada no treinamento)
+
 - `last_close`: preço de fechamento ajustado (Adj Close) do **último dia da janela**
 
-> ❗ Você deve enviar **apenas uma janela**, não múltiplas janelas.
+> ❗ Deve ser enviada **apenas uma janela**, não múltiplas janelas.
 
 ---
 
@@ -104,13 +170,13 @@ Para prever o dia **t+1**, envie as features dos dias:
 t-9, t-8, t-7, t-6, t-5, t-4, t-3, t-2, t-1, t
 ```
 
-Cada linha contém **todas as features daquele dia**.
+Cada linha representa **todas as features de um único dia**.
 
 ---
 
 ### ✅ Exemplo de requisição (JSON)
 
-Supondo as seguintes features usadas no treinamento:
+Supondo as seguintes features utilizadas no treinamento:
 
 ```python
 FEATURE_COLS = [
@@ -145,13 +211,15 @@ Com `LOOKBACK = 10`, o corpo da requisição será:
 }
 ```
 
+---
+
 ### Observações importantes
 
 - Cada linha representa **um único dia**
 - A ordem deve ser do dia **mais antigo → mais recente**
 - Os valores devem estar na **escala original** (não normalizados)
 - A normalização é aplicada internamente pela API
-- Consulte `GET /model_info` para confirmar `lookback` e ordem das features
+- Consulte `GET /model_info` para confirmar o `lookback` e a ordem das features
 
 ---
 
@@ -176,10 +244,9 @@ A API retorna tanto o **retorno previsto** quanto o **preço reconstruído**:
 
 Este projeto foi desenvolvido como parte do **Tech Challenge – FIAP (Fase 4)**, contemplando:
 
-- Deep Learning com LSTM
-- Séries temporais financeiras
-- Pipeline de treino → inferência
-- Deploy via API REST
+- Deep Learning com LSTM  
+- Séries temporais financeiras  
+- Pipeline de treino → inferência  
+- Deploy via API REST  
 
 A abordagem de previsão indireta via retorno foi adotada por sua maior robustez estatística e melhor comportamento em produção.
-
