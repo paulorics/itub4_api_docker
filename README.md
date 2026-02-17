@@ -27,7 +27,7 @@ artifacts_itub4_return/
   └── metrics.json
 ```
 
-> ⚠️ Importante: este projeto assume um **modelo de retorno**. Caso você também possua um modelo de preço direto, mantenha os artefatos em pastas separadas.
+> ⚠️ Importante: este projeto assume um **modelo de retorno**.
 
 Também é necessário ter:
 
