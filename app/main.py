@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel, Field
 
 from src.inference_api import load_bundle, predict_next_return_pct_from_features
@@ -61,13 +61,17 @@ class PredictFromHistoryRequest(BaseModel):
 
 class PredictAutoRequest(BaseModel):
     """
-    Endpoint de conveniência: a API busca automaticamente os dados (Yahoo) via requests
-    (src/data_loader.py) para contornar falhas/429 no yfinance em algumas redes locais.
+    Endpoint automático.
+    
+    Observação:
+    - O ticker é fixo: ITUB4.SA
+    - O intervalo é fixo: 1d
+    - A API busca os dados automaticamente via Yahoo Finance.
     """
-    ticker: str = Field(TICKER_DEFAULT, description="Ticker no Yahoo Finance (ex.: ITUB4.SA)")
-    period_days: int = Field(180, description="Quantos dias para trás usar como histórico (padrão 180)")
-    interval: str = Field("1d", description="Intervalo do Yahoo Finance (ex.: 1d, 1h)")
-
+    period_days: int = Field(
+        180,
+        description="Quantos dias para trás usar como histórico (padrão 180)"
+    )
 
 # =========================
 # Feature Engineering
@@ -124,13 +128,10 @@ def make_window_features(feat: pd.DataFrame, feature_cols: List[str], lookback: 
 def startup():
     bundle = load_bundle(ARTIFACT_DIR)
     app.state.model = bundle["model"]
-    app.state.x_min = bundle["x_min"]
-    app.state.x_scale = bundle["x_scale"]
-    app.state.y_min = bundle["y_min"]
-    app.state.y_scale = bundle["y_scale"]
+    app.state.x_scaler = bundle["x_scaler"]
+    app.state.y_scaler = bundle["y_scaler"]
     app.state.lookback = int(bundle["lookback"])
     app.state.features = list(bundle["features"])
-
 
 # =========================
 # Basic endpoints
@@ -155,8 +156,73 @@ def model_info():
 # =========================
 # Endpoint 1: Low-level (features prontas)
 # =========================
-@app.post("/predict")
-def predict_from_features(req: PredictFeaturesRequest):
+@app.post(
+    "/predict",
+    summary="Previsão a partir de FEATURES prontas (low-level / Return → Price)",
+    description="""
+Este endpoint é o modo **low-level** da API: você fornece diretamente a matriz de **features já calculadas**
+no formato esperado pelo modelo (LSTM), e a API apenas:
+
+1. Valida dimensões (`lookback` x `K`)
+2. Normaliza com os scalers salvos (.joblib)
+3. Executa o modelo LSTM
+4. Retorna o **retorno previsto (%)** e o **próximo preço estimado (t+1)**
+
+### Quando usar
+Use este endpoint quando você:
+- já tem um pipeline de feature engineering próprio (CSV, banco, ETL, etc.)
+- quer total controle sobre as features e sua ordem
+- quer evitar qualquer transformação interna de preços/volume
+
+### Entrada esperada
+- `features_history`: matriz 2D com shape **(LOOKBACK x K)** na mesma ordem do treinamento
+- `last_close`: Adj Close do último dia da janela (P_t). Usado para reconstruir o preço (t+1)
+
+### Regras de validação
+- `features_history` deve ter exatamente `lookback` linhas
+- cada linha deve ter exatamente `K` colunas (número de features do modelo)
+- `last_close` deve ser > 0
+
+### Retorno
+- `predicted_return_pct`: retorno previsto para o próximo passo (%)
+- `predicted_next_close`: preço estimado do próximo dia (t+1)
+- `last_close_used`: preço base usado (t)
+- `lookback`: janela utilizada
+- `n_features`: número de features (K)
+- `latency_ms`: tempo de inferência
+""",
+    response_description="Resultado da previsão (retorno % e preço t+1) com metadados de execução."
+)
+def predict_from_features(
+    req: PredictFeaturesRequest = Body(
+        ...,
+        openapi_examples={
+            "exemplo_basico": {
+                "summary": "Exemplo básico (formato correto)",
+                "description": "Exemplo ilustrativo. Ajuste para ter exatamente LOOKBACK linhas e K colunas.",
+                "value": {
+                    "features_history": [
+                        [30.10, 15000000, 0.25, 1.10, 55.2, 29.90, 30.05],
+                        [30.15, 14800000, -0.10, 1.05, 54.8, 29.95, 30.07],
+                        [30.20, 16000000, 0.30, 1.12, 56.0, 30.00, 30.10]
+                    ],
+                    "last_close": 30.20
+                }
+            },
+            "exemplo_minimo_ilustrativo": {
+                "summary": "Exemplo mínimo (apenas formato)",
+                "description": "Apenas para demonstrar o JSON; não necessariamente respeita lookback/K do seu modelo.",
+                "value": {
+                    "features_history": [
+                        [0.0, 0.0],
+                        [0.0, 0.0]
+                    ],
+                    "last_close": 30.0
+                }
+            }
+        },
+    )
+):
     lookback = int(app.state.lookback)
     features = app.state.features
     K = len(features)
@@ -178,11 +244,10 @@ def predict_from_features(req: PredictFeaturesRequest):
     pred_return_pct = predict_next_return_pct_from_features(
         model=app.state.model,
         X_hist=X_hist,
-        x_min=app.state.x_min,
-        x_scale=app.state.x_scale,
-        y_min=app.state.y_min,
-        y_scale=app.state.y_scale,
+        x_scaler=app.state.x_scaler,
+        y_scaler=app.state.y_scaler,
     )
+
     predicted_next_close = last_close * (1.0 + (pred_return_pct / 100.0))
     latency_ms = (time.time() - t0) * 1000.0
 
@@ -201,8 +266,89 @@ def predict_from_features(req: PredictFeaturesRequest):
 # =========================
 # Endpoint 2: Principal (usuário fornece histórico)
 # =========================
-@app.post("/predict_from_history")
-def predict_from_history(req: PredictFromHistoryRequest):
+@app.post(
+    "/predict_from_history",
+    summary="Previsão a partir de histórico fornecido (Return → Price)",
+    description="""
+Este endpoint realiza a previsão do **próximo retorno (%)** e do **próximo preço estimado (t+1)**
+a partir de um **histórico de preços fornecido pelo usuário**.
+
+### Quando usar
+Use este endpoint quando você já possui os dados históricos (ex.: do seu pipeline, banco, CSV)
+e quer evitar a coleta automática de dados.
+
+### Entrada esperada
+Você deve enviar uma lista `history` com linhas contendo:
+
+- `date` (YYYY-MM-DD)
+- `adj_close` (Adj Close)
+- `volume` (Volume)
+
+A API irá:
+1. Ordenar o histórico por data
+2. Executar a engenharia de features (médias móveis, retornos, volatilidade, RSI, etc.)
+3. Selecionar as últimas `lookback` linhas válidas após `dropna()`
+4. Normalizar usando os scalers salvos (.joblib)
+5. Executar o modelo LSTM e retornar:
+   - `predicted_return_pct` (retorno previsto em %)
+   - `predicted_next_close` (preço estimado t+1 a partir de `last_close_used`)
+
+### Observações importantes
+- É necessário enviar **histórico suficiente** para que, após o cálculo das features rolling e o `dropna()`,
+  sobrem pelo menos `lookback` linhas válidas.
+- Se houver dados insuficientes ou formato inválido, o endpoint retorna **HTTP 400**.
+
+### Retorno
+- `predicted_return_pct`: retorno previsto para o próximo passo (%)
+- `predicted_next_close`: preço estimado do próximo dia (t+1)
+- `last_close_used`: último Adj Close efetivamente usado como base (t)
+- `history_rows_received`: quantidade de linhas recebidas
+- `history_rows_used_after_features`: linhas restantes após feature engineering (dropna)
+""",
+    response_description="Resultado da previsão (retorno % e preço t+1) com metadados de execução."
+)
+def predict_from_history(
+    req: PredictFromHistoryRequest = Body(
+        ...,
+        openapi_examples={
+            "exemplo_minimo": {
+                "summary": "Exemplo de histórico (formato mínimo)",
+                "description": (
+                    "Envie um histórico com date/adj_close/volume. "
+                    "Na prática, envie linhas suficientes para sobrar >= lookback após as features."
+                ),
+                "value": {
+                    "ticker": "ITUB4.SA",
+                    "history": [
+                        {"date": "2024-01-02", "adj_close": 30.15, "volume": 15230000},
+                        {"date": "2024-01-03", "adj_close": 30.40, "volume": 13120000},
+                        {"date": "2024-01-04", "adj_close": 29.98, "volume": 18900000},
+                        {"date": "2024-01-05", "adj_close": 30.10, "volume": 14500000},
+                        {"date": "2024-01-08", "adj_close": 30.55, "volume": 21000000},
+                    ]
+                },
+            },
+            "exemplo_com_mais_dados": {
+                "summary": "Exemplo com mais linhas (recomendado)",
+                "description": (
+                    "Exemplo ilustrativo com mais observações. "
+                    "Para lookback=90 e features rolling (ex.: 21), "
+                    "use um histórico consideravelmente maior (ex.: 180+ linhas)."
+                ),
+                "value": {
+                    "ticker": "ITUB4.SA",
+                    "history": [
+                        {"date": "2023-12-18", "adj_close": 29.10, "volume": 18000000},
+                        {"date": "2023-12-19", "adj_close": 29.25, "volume": 17500000},
+                        {"date": "2023-12-20", "adj_close": 29.05, "volume": 22000000},
+                        {"date": "2023-12-21", "adj_close": 29.30, "volume": 16000000},
+                        {"date": "2023-12-22", "adj_close": 29.80, "volume": 25000000},
+                    ]
+                },
+            },
+        },
+    )
+):
     lookback = int(app.state.lookback)
     feature_cols = app.state.features
 
@@ -231,16 +377,15 @@ def predict_from_history(req: PredictFromHistoryRequest):
     pred_return_pct = predict_next_return_pct_from_features(
         model=app.state.model,
         X_hist=X_hist,
-        x_min=app.state.x_min,
-        x_scale=app.state.x_scale,
-        y_min=app.state.y_min,
-        y_scale=app.state.y_scale,
+        x_scaler=app.state.x_scaler,
+        y_scaler=app.state.y_scaler,
     )
+
     predicted_next_close = last_close * (1.0 + (pred_return_pct / 100.0))
     latency_ms = (time.time() - t0) * 1000.0
 
     return {
-        "ticker": req.ticker or TICKER_DEFAULT,
+        "ticker": TICKER_DEFAULT,
         "predicted_return_pct": float(pred_return_pct),
         "predicted_next_close": float(predicted_next_close),
         "last_close_used": float(last_close),
@@ -256,24 +401,83 @@ def predict_from_history(req: PredictFromHistoryRequest):
 # =========================
 # Endpoint 3: Conveniência (busca automática via requests data_loader)
 # =========================
-@app.post("/predict_auto")
+@app.post(
+    "/predict_auto",
+    summary="Previsão automática para ITUB4.SA (modelo LSTM de retorno → preço)",
+    description="""
+Este endpoint realiza **previsão automática do próximo retorno (%) e preço estimado**
+para o ativo **ITUB4.SA**, utilizando um modelo LSTM previamente treinado.
+
+### Configuração Fixa
+
+- **Ticker:** ITUB4.SA  
+- **Intervalo:** 1d (diário)  
+- **Fonte de dados:** Yahoo Finance (via data_loader com múltiplas tentativas)
+
+O usuário informa apenas:
+
+- **period_days:** quantidade de dias anteriores a serem utilizados como base histórica.
+
+---
+
+### Como funciona internamente
+
+1. A API calcula a data inicial com base em `period_days`.
+2. Busca um range amplo (10 anos) para garantir estabilidade nas features rolling.
+3. Filtra os dados a partir da data calculada.
+4. Constrói as features técnicas:
+   - Médias móveis (9 e 21 períodos)
+   - Retornos percentuais
+   - Volatilidade rolling
+   - RSI (14)
+5. Seleciona as últimas `lookback` observações válidas.
+6. Aplica normalização usando os scalers salvos (.joblib).
+7. Executa o modelo LSTM.
+8. Converte o retorno previsto (%) em preço estimado (t+1).
+
+---
+
+### Retorno
+
+O endpoint retorna:
+
+- `predicted_return_pct` → retorno previsto para o próximo dia (%)
+- `predicted_next_close` → preço estimado (t+1)
+- `last_close_used` → preço base utilizado (t)
+- `lookback` → tamanho da janela usada
+- `n_features` → número de features do modelo
+- `latency_ms` → tempo de inferência
+- `rows_used_after_features` → quantidade de linhas válidas após engenharia de features
+
+---
+
+### Possíveis erros
+
+- **502** → Falha na coleta automática de dados externos
+- Histórico insuficiente após engenharia de features
+- Dados retornados sem colunas obrigatórias
+
+Este endpoint é recomendado para uso simplificado quando não se deseja enviar
+features manualmente.
+"""
+)
 def predict_auto(req: PredictAutoRequest):
     lookback = int(app.state.lookback)
     feature_cols = app.state.features
 
     # Para garantir estabilidade das features (rolling 21, RSI 14, etc.),
-    # buscamos um range maior (ex.: 5y) e filtramos por start.
+    # buscamos um range maior (ex.: 10y) e filtramos por start.
     # Isso evita depender do parâmetro "range" dinâmico no data_loader,
     # e mantém compatibilidade com a função fetch_yahoo_prices.
     try:
         start = (pd.Timestamp.now("UTC") - pd.Timedelta(days=int(req.period_days))).date().isoformat()
 
         df = fetch_yahoo_prices(
-            symbol=req.ticker,
+            symbol="ITUB4.SA",
             start=start,
             end=None,
-            range_="5y",          # busca amplo e filtra por start
-            interval=req.interval,
+            range_="10y",          # busca amplo e filtra por start
+            interval="1d",
             tries=10,
         )
 
@@ -299,16 +503,15 @@ def predict_auto(req: PredictAutoRequest):
     pred_return_pct = predict_next_return_pct_from_features(
         model=app.state.model,
         X_hist=X_hist,
-        x_min=app.state.x_min,
-        x_scale=app.state.x_scale,
-        y_min=app.state.y_min,
-        y_scale=app.state.y_scale,
+        x_scaler=app.state.x_scaler,
+        y_scaler=app.state.y_scaler,
     )
+    
     predicted_next_close = last_close * (1.0 + (pred_return_pct / 100.0))
     latency_ms = (time.time() - t0) * 1000.0
 
     return {
-        "ticker": req.ticker,
+        "ticker": TICKER_DEFAULT,
         "predicted_return_pct": float(pred_return_pct),
         "predicted_next_close": float(predicted_next_close),
         "last_close_used": float(last_close),
@@ -316,7 +519,7 @@ def predict_auto(req: PredictAutoRequest):
         "n_features": len(feature_cols),
         "latency_ms": latency_ms,
         "mode": "auto_data_loader_requests",
-        "interval": req.interval,
+        "interval": "1d",
         "period_days": int(req.period_days),
         "rows_used_after_features": int(len(feat)),
         "start_filter_used": start,

@@ -146,23 +146,31 @@ Isso permite que o endpoint retorne:
 
 ## 5) Como chamar o endpoint `/predict`
 
-O endpoint `/predict` realiza **uma única previsão** do próximo dia (**t+1**) a partir de **uma única janela temporal**.
+O endpoint `/predict` realiza **uma única previsão do próximo dia (t+1)** a partir de **uma única janela temporal já pronta de features**.
 
-### 📌 Formato esperado da entrada
+> ⚠ **Importante:**  
+> O modelo foi treinado com **`lookback = 90`**.  
+> Sempre envie exatamente **90 linhas** em `features_history`.  
+> O valor `10` mostrado nos exemplos abaixo é apenas ilustrativo para facilitar a compreensão da estrutura.
+
+---
+
+## 📌 Formato esperado da entrada
 
 O corpo da requisição deve conter:
 
 - `features_history`: matriz 2D  
-  - **N linhas = LOOKBACK** (ex.: 10)  
-  - **K colunas = número de features** (na mesma ordem usada no treinamento)
+  - **N linhas = LOOKBACK (90 no modelo atual)**  
+  - **K colunas = número de features usadas no treinamento**  
+  - Deve respeitar exatamente a **ordem das features do treinamento**
 
-- `last_close`: preço de fechamento ajustado (Adj Close) do **último dia da janela**
+- `last_close`: preço de fechamento ajustado (**Adj Close**) do **último dia da janela**
 
 > ❗ Deve ser enviada **apenas uma janela**, não múltiplas janelas.
 
 ---
 
-### ✅ Exemplo conceitual (LOOKBACK = 10)
+## ✅ Exemplo conceitual (LOOKBACK = 10 – apenas ilustrativo)
 
 Para prever o dia **t+1**, envie as features dos dias:
 
@@ -172,9 +180,11 @@ t-9, t-8, t-7, t-6, t-5, t-4, t-3, t-2, t-1, t
 
 Cada linha representa **todas as features de um único dia**.
 
+No modelo real (lookback = 90), a lógica é a mesma — apenas com 90 dias consecutivos.
+
 ---
 
-### ✅ Exemplo de requisição (JSON)
+## ✅ Exemplo de requisição (JSON)
 
 Supondo as seguintes features utilizadas no treinamento:
 
@@ -191,7 +201,7 @@ FEATURE_COLS = [
 ]
 ```
 
-Com `LOOKBACK = 10`, o corpo da requisição será:
+Exemplo ilustrativo com `LOOKBACK = 10`:
 
 ```json
 {
@@ -211,21 +221,41 @@ Com `LOOKBACK = 10`, o corpo da requisição será:
 }
 ```
 
+> 🔎 No ambiente real, substitua por **90 linhas completas**.
+
 ---
 
-### Observações importantes
+## 🔎 Outros endpoints disponíveis
 
-- Cada linha representa **um único dia**
-- A ordem deve ser do dia **mais antigo → mais recente**
-- Os valores devem estar na **escala original** (não normalizados)
-- A normalização é aplicada internamente pela API
-- Consulte `GET /model_info` para confirmar o `lookback` e a ordem das features
+Além do `/predict`, a API também oferece:
+
+### 🔹 `/predict_from_history`
+
+- O usuário envia **dados históricos brutos** (`date`, `adj_close`, `volume`)
+- A API executa automaticamente:
+  - Engenharia de features
+  - Seleção da janela (lookback = 90)
+  - Normalização
+  - Inferência
+
+Indicado para quem **não deseja montar manualmente as features**.
+
+---
+
+### 🔹 `/predict_auto`
+
+- A API busca automaticamente os dados no Yahoo Finance
+- Ticker fixo: **ITUB4.SA**
+- Intervalo fixo: **1d**
+- O usuário informa apenas `period_days`
+
+Indicado para uso simplificado ou testes rápidos.
 
 ---
 
 ## 6) Resposta da API
 
-A API retorna tanto o **retorno previsto** quanto o **preço reconstruído**:
+A API retorna:
 
 ```json
 {
@@ -233,20 +263,35 @@ A API retorna tanto o **retorno previsto** quanto o **preço reconstruído**:
   "predicted_return_pct": 0.35,
   "predicted_next_close": 45.34,
   "last_close_used": 45.18,
-  "lookback": 10,
+  "lookback": 90,
   "n_features": 8
 }
 ```
+
+### Campos retornados
+
+- `predicted_return_pct` → retorno previsto para t+1 (%)
+- `predicted_next_close` → preço estimado para t+1
+- `last_close_used` → preço base utilizado (t)
+- `lookback` → tamanho da janela (90)
+- `n_features` → número de features do modelo
 
 ---
 
 ## 7) Observação final
 
-Este projeto foi desenvolvido como parte do **Tech Challenge – FIAP (Fase 4)**, contemplando:
+Este modelo foi treinado com:
+
+- **Lookback = 90**
+- Features técnicas derivadas de preço e volume
+- Normalização via Scikit-Learn (scalers salvos em `.joblib`)
+- Arquitetura LSTM para previsão de **retorno percentual**
+
+O projeto foi desenvolvido como parte do **Tech Challenge – FIAP (Fase 4)**, contemplando:
 
 - Deep Learning com LSTM  
 - Séries temporais financeiras  
-- Pipeline de treino → inferência  
+- Pipeline completo de treino → inferência  
 - Deploy via API REST  
 
-A abordagem de previsão indireta via retorno foi adotada por sua maior robustez estatística e melhor comportamento em produção.
+A abordagem de previsão indireta via retorno foi adotada por sua maior robustez estatística e melhor estabilidade em produção.

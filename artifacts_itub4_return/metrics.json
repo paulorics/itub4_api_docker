@@ -1,7 +1,7 @@
 {
   "ticker": "ITUB4.SA",
   "target": "return",
-  "lookback": 10,
+  "lookback": 90,
   "features": [
     "Adj Close",
     "Volume",
@@ -12,7 +12,7 @@
     "avg_last_21",
     "rsi"
   ],
-  "MAE_pp": 1.0126835107803345,
-  "RMSE_pp": 1.3301748037338257,
-  "DirectionalAccuracy": 0.5657142857142857
+  "MAE_pp": 1.010454773902893,
+  "RMSE_pp": 1.358942985534668,
+  "DirectionalAccuracy": 0.5709219858156028
 }

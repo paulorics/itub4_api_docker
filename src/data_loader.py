@@ -9,7 +9,7 @@ def fetch_yahoo_prices(
     symbol: str,
     start: str = None,
     end: str = None,
-    range_: str = "5y",
+    range_: str = "10y",
     interval: str = "1d",
     tries: int = 10,
 ) -> pd.DataFrame:
